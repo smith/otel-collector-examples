@@ -1,0 +1,19 @@
+services:
+  elastic-agent:
+    container_name: elastic-agent
+    image: docker.elastic.co/elastic-agent/elastic-agent:9.6.0-SNAPSHOT
+    command: ["otel", "--config", "/etc/elastic-agent/otel-collector.yaml"]
+    restart: unless-stopped
+    environment:
+      ELASTIC_ENDPOINT: ${ELASTIC_ENDPOINT:?Set ELASTIC_ENDPOINT to your Elasticsearch URL}
+      ELASTICSEARCH_API_KEY: ${ELASTICSEARCH_API_KEY:?Set ELASTICSEARCH_API_KEY to an Elasticsearch API key}
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    configs:
+      - source: otel-config
+        target: /etc/elastic-agent/otel-collector.yaml
+
+configs:
+  otel-config:
+    file: ./otel-collector.yaml

@@ -1,0 +1,56 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+connectors:
+  elasticapm: {}
+  forward: {}
+
+processors:
+  elasticapm: {}
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100
+    expected_new_traces_per_sec: 10
+    policies:
+      - name: latency-5000ms-10000ms
+        type: latency
+        latency:
+          threshold_ms: 5000
+          upper_threshold_ms: 10000
+
+exporters:
+  debug: {}
+  otlphttp/elastic:
+    endpoint: ${env:ELASTIC_ENDPOINT}
+    headers:
+      Authorization: ApiKey ${env:ELASTICSEARCH_API_KEY}
+    tls:
+      insecure_skip_verify: true
+
+service:
+  pipelines:
+    traces/1-process-elastic:
+      receivers: [otlp]
+      processors: [elasticapm]
+      exporters: [debug, elasticapm, forward]
+    traces/2-process-tbs:
+      receivers: [forward]
+      processors: [tail_sampling]
+      exporters: [debug, otlphttp/elastic]
+    metrics/aggregated-otel-metrics:
+      receivers: [elasticapm]
+      processors: []
+      exporters: [debug, otlphttp/elastic]
+    metrics:
+      receivers: [otlp]
+      processors: []
+      exporters: [debug, otlphttp/elastic]
+    logs:
+      receivers: [otlp]
+      processors: []
+      exporters: [debug, otlphttp/elastic]
