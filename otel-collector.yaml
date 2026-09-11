@@ -17,15 +17,37 @@ processors:
     num_traces: 100
     expected_new_traces_per_sec: 10
     policies:
-      - name: latency-5000ms-10000ms
+      - name: latency-gt-1s
         type: latency
         latency:
-          threshold_ms: 5000
+          threshold_ms: 1000
           upper_threshold_ms: 10000
+      # - name: baseline
+      #   type: probabilistic
+      #   probabilistic:
+      #     sampling_percentage: 100
+      - name: errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: sampled-exit-spans
+        type: and
+        and:
+          and_sub_policy:
+            - name: has-exit-span
+              type: ottl_condition
+              ottl_condition:
+                error_mode: ignore
+                span:
+                  - kind == SPAN_KIND_CLIENT or kind == SPAN_KIND_PRODUCER
+            - name: twenty-percent
+              type: probabilistic
+              probabilistic:
+                sampling_percentage: 20
 
 exporters:
   debug: {}
-  otlphttp/elastic:
+  otlp_http/elastic:
     endpoint: ${env:ELASTIC_ENDPOINT}
     headers:
       Authorization: ApiKey ${env:ELASTICSEARCH_API_KEY}
@@ -41,16 +63,16 @@ service:
     traces/2-process-tbs:
       receivers: [forward]
       processors: [tail_sampling]
-      exporters: [debug, otlphttp/elastic]
+      exporters: [debug, otlp_http/elastic]
     metrics/aggregated-otel-metrics:
       receivers: [elasticapm]
       processors: []
-      exporters: [debug, otlphttp/elastic]
+      exporters: [debug, otlp_http/elastic]
     metrics:
       receivers: [otlp]
       processors: []
-      exporters: [debug, otlphttp/elastic]
+      exporters: [debug, otlp_http/elastic]
     logs:
       receivers: [otlp]
       processors: []
-      exporters: [debug, otlphttp/elastic]
+      exporters: [debug, otlp_http/elastic]
