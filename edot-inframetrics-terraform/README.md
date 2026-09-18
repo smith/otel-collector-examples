@@ -25,7 +25,7 @@ The [Kubernetes pod view](https://www.elastic.co/docs/reference/observability/ob
 | Inbound Traffic | `kubernetes.pod.network.rx.bytes` | rate of the max |
 | Outbound Traffic | `kubernetes.pod.network.tx.bytes` | rate of the max |
 
-An OpenTelemetry collector produces none of those fields natively. The kubelet stats receiver emits `k8s.pod.*` metrics with OTel semantic convention names, and the Elasticsearch exporter in its default OTel mapping mode writes them as-is to `metrics-kubeletstatsreceiver.otel-default`. The pipeline below turns one into the other:
+An OpenTelemetry collector produces none of those fields natively. The kubelet stats receiver emits `k8s.pod.*` metrics with OTel semantic convention names, and by default the Elasticsearch exporter writes them as-is. The pipeline below turns one into the other:
 
 ```
 kubelet_stats                 scrape this node's kubelet summary API, emit k8s.pod.* metrics
@@ -60,9 +60,9 @@ Stage by stage:
 
 4. **event.module.** The processor sets `event.dataset` but not `event.module`, and the inventory filters on `event.module: kubernetes`. An attributes processor adds it.
 
-5. **Mapping mode.** The Elasticsearch exporter picks how to serialize each scope's metrics from the `elastic.mapping.mode` scope attribute. The exporter's own `mapping::mode` setting is deprecated and ignored. A transform processor sets the attribute to `ecs`, which makes the exporter write flat ECS field names instead of the OTel document layout, and route each document to `metrics-<data_stream.dataset>-<data_stream.namespace>`. With the dataset set by the processor and no namespace attribute, that is `metrics-kubernetes.pod-default`.
+5. **Mapping mode.** The Elasticsearch exporter picks how to serialize each scope's metrics from the `elastic.mapping.mode` scope attribute. A transform processor sets it to `ecs`, which makes the exporter write flat ECS field names and route each document to `metrics-<data_stream.dataset>-<data_stream.namespace>`. With the dataset set by the processor and no namespace attribute, that is `metrics-kubernetes.pod-default`.
 
-6. **Index template.** The Kubernetes integration, installed in Kibana, owns the `metrics-kubernetes.pod` index template. It creates the data stream in time series (TSDB) mode with the integration's field mappings, so `kubernetes.pod.uid` is a keyword dimension and the percentages are numeric. Without the integration installed the documents would land under generic templates and the inventory would not find them reliably. TSDB also drives one batch setting: `send_batch_max_size: 0` keeps a scrape in a single bulk request, since splitting it can raise `version_conflict_engine_exception` on time series indices.
+6. **Index template.** The Kubernetes integration, installed in Kibana, owns the `metrics-kubernetes.pod` index template. It creates the data stream in time series (TSDB) mode with the integration's field mappings, so `kubernetes.pod.uid` is a keyword dimension and the percentages are numeric. TSDB also drives one batch setting: `send_batch_max_size: 0` keeps a scrape in a single bulk request, since splitting it can raise `version_conflict_engine_exception` on time series indices.
 
 A resulting document, as stored by this example for the coredns pod on minikube:
 
@@ -84,7 +84,6 @@ A resulting document, as stored by this example for the coredns pod on minikube:
       "network": { "rx": { "bytes": 525118 }, "tx": { "bytes": 347977 } }
     }
   },
-  "k8s": { "node": { "ip": "192.168.49.2" }, "pod": { "ip": "10.244.0.2", "start_time": "2026-09-18T02:45:38Z" } },
   "orchestrator": { "cluster": { "name": "minikube" } },
   "host": { "name": "minikube", "hostname": "minikube" },
   "service": { "type": "kubernetes" },
@@ -92,7 +91,7 @@ A resulting document, as stored by this example for the coredns pod on minikube:
 }
 ```
 
-The `kubernetes.*` fields are what the inventory reads. The `k8s.*` fields are OTel resource attributes that have no ECS name and are kept as-is by the exporter.
+The `kubernetes.*` fields are what the inventory reads.
 
 ## What gets deployed
 
@@ -203,9 +202,9 @@ This example is deliberately the smallest thing that works. The points below are
 
 - **Node metrics.** The same processor remaps the k8s_cluster receiver's metrics into the `kubernetes.node` dataset. If the cluster collector's `k8s_cluster` metrics are routed through the same chain, node allocatable and capacity fields appear alongside the pod metrics.
 
-- **Deprecation.** Elastic marks `elasticinframetrics` as deprecated and keeps it in Elastic Agent 9.x for backwards compatibility. It is the only supported way to feed the pod inventory from an OpenTelemetry collector today, so plan to revisit this when the inventory gains native OTel support for pods.
+- **Deprecation.** Elastic marks `elasticinframetrics` as deprecated and keeps it in Elastic Agent 9.x for backwards compatibility. It is the only way to feed the pod inventory from an OpenTelemetry collector today.
 
-- **Kubelet access.** Each collector pod needs `nodes/stats` and `nodes/proxy` (or `nodes/pods` on Kubernetes 1.33+) on the API, which the chart's ClusterRole grants. The kubelet connection skips TLS verification because kubelet serving certificates are usually self-signed. `hostNetwork: true` is what lets the pod resolve the node name. Both are inherited from the Elastic values.
+- **Kubelet access.** The chart's ClusterRole grants the collector's service account the `nodes/stats` permission the kubelet API requires. The kubelet connection skips TLS verification because kubelet serving certificates are usually self-signed. `hostNetwork: true` is what lets the pod resolve the node name. Both are inherited from the Elastic values.
 
 - **Network metrics.** `kubernetes.pod.network.rx.bytes` and `tx.bytes` come from the kubelet summary API, which does not report per-pod network stats on every runtime and CNI combination. Where it does not, the traffic columns in the inventory show `-` while CPU and memory are unaffected. On this minikube (Docker driver, containerd, kindnet) they were reported.
 

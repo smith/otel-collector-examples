@@ -174,9 +174,8 @@ collectors:
               value: kubernetes
               action: upsert
         # The Elasticsearch exporter chooses its mapping mode per scope from
-        # this attribute (the exporter's mapping::mode setting is deprecated).
-        # ECS mode writes flat ECS field names and routes documents to
-        # metrics-<data_stream.dataset>-<data_stream.namespace>.
+        # this attribute. ECS mode writes flat ECS field names and routes
+        # documents to metrics-<data_stream.dataset>-<data_stream.namespace>.
         transform/ecs_mapping_mode:
           metric_statements:
             - context: scope
