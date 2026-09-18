@@ -51,7 +51,7 @@ Stage by stage:
 
 4. **Collector identity** (Deployment only). The chart passes the collector pod's own name, namespace and IPs in `OTEL_RESOURCE_ATTRIBUTES`, and the env resource detector adds them to any resource that lacks them. Pod metrics already have their own values, but node metrics do not, so without this step every node document would name the collector pod. A resource processor deletes those attributes. `k8s.cluster.name` is kept.
 
-5. **Allocatable CPU as an integer** (Deployment only). `k8s.node.allocatable_cpu` is a double, for example 3.92 cores. The infra metrics processor reads the data point as an integer and would produce 0, so a transform converts the value first. Fractional cores are truncated.
+5. **Allocatable CPU as an integer** (Deployment only). `k8s.node.allocatable_cpu` is a double, for example 3.92 cores. The infra metrics processor reads the data point as an integer and would produce 0 ([opentelemetry-lib#308](https://github.com/elastic/opentelemetry-lib/issues/308)), so a transform converts the value first. Fractional cores are truncated.
 
 6. **Elastic infra metrics processor.** Only acts on scope metrics whose scope name starts with the kubeletstats receiver's or the k8s_cluster receiver's module path. Anything else passes through untouched. It reads these inputs and emits these outputs, tagging each data point with `data_stream.dataset` and `event.dataset`:
 
@@ -68,7 +68,7 @@ Stage by stage:
 
    With `drop_original: true` the OTel originals in those scopes are removed, so the pipeline sends only ECS documents. Container and volume metrics from the kubelet, and the pod, deployment and other metrics from the cluster receiver, have no mapping in this processor and are dropped with the rest. `add_system_metrics: false` disables the host metrics remapper, which is not relevant here.
 
-7. **Attributes.** The processor sets `event.dataset` but not `event.module`, and the inventory filters on `event.module: kubernetes`, so an attributes processor adds it. For node metrics the same processor also overrides the dataset to `kubernetes.state_node`. The processor labels them `kubernetes.node`, but in the Kubernetes integration the two allocatable fields belong to the `state_node` dataset, the one fed by kube-state-metrics from the same API server data. See stage 9 for why this matters.
+7. **Attributes.** The processor sets `event.dataset` but not `event.module`, and the inventory filters on `event.module: kubernetes`, so an attributes processor adds it. For node metrics the same processor also overrides the dataset to `kubernetes.state_node`. The processor labels them `kubernetes.node` ([opentelemetry-lib#307](https://github.com/elastic/opentelemetry-lib/issues/307)), but in the Kubernetes integration the two allocatable fields belong to the `state_node` dataset, the one fed by kube-state-metrics from the same API server data. See stage 9 for why this matters.
 
 8. **Mapping mode.** The Elasticsearch exporter picks how to serialize each scope's metrics from the `elastic.mapping.mode` scope attribute. A transform processor sets it to `ecs`, which makes the exporter write flat ECS field names and route each document to `metrics-<data_stream.dataset>-<data_stream.namespace>`. That is `metrics-kubernetes.pod-default` and `metrics-kubernetes.state_node-default`.
 

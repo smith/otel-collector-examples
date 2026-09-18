@@ -293,6 +293,7 @@ collectors:
         # k8s.node.allocatable_cpu is a double (for example 3.92 cores). The
         # processor reads the data point as an integer and would produce 0, so
         # convert it first. Fractional cores are truncated.
+        # https://github.com/elastic/opentelemetry-lib/issues/308
         transform/allocatable_cpu_int:
           metric_statements:
             - context: datapoint
@@ -313,6 +314,7 @@ collectors:
         # fields with the right types and uses kubernetes.node.name as a time
         # series dimension. The kubernetes.node data stream does neither and
         # rejects these documents, so route them to state_node.
+        # https://github.com/elastic/opentelemetry-lib/issues/307
         attributes/dataset:
           actions:
             - key: event.module
