@@ -1,13 +1,15 @@
-# opentelemetry-kube-stack values for a single Elastic Agent OpenTelemetry
-# collector that scrapes the kubelet on every node and writes pod metrics to
-# Elasticsearch in the Elastic Kubernetes integration (ECS) schema, so they
-# appear in the Kibana infrastructure inventory.
+# opentelemetry-kube-stack values for Elastic Agent OpenTelemetry collectors
+# that collect Kubernetes pod and node metrics and write them to Elasticsearch
+# in the Elastic Kubernetes integration (ECS) schema, so they appear in the
+# Kibana infrastructure inventory.
 #
 # Cut down from the Elastic-recommended values file:
 # https://github.com/elastic/elastic-agent/blob/v9.5.4/deploy/helm/edot-collector/kube-stack/values.yaml
-# Logs, traces, host metrics, cluster metrics, the gateway collector and
-# auto-instrumentation are removed. Only the node-level DaemonSet collector
-# remains, and it exports straight to Elasticsearch.
+# Logs, traces, host metrics, Kubernetes events, the gateway collector and
+# auto-instrumentation are removed. Two collectors remain and both export
+# straight to Elasticsearch:
+#   daemon  - DaemonSet, one per node, scrapes the node's kubelet (pod metrics)
+#   cluster - Deployment, one per cluster, watches the API server (node metrics)
 #
 # Tested with opentelemetry-kube-stack chart 0.16.0 and Elastic Agent 9.5.4.
 
@@ -215,6 +217,145 @@ collectors:
               - resource/hostname
               - elasticinframetrics
               - attributes/event_module
+              - transform/ecs_mapping_mode
+              - batch/metrics
+            exporters:
+              - debug
+              - elasticsearch
+
+  # One collector for the whole cluster. Watches the API server for
+  # cluster-level metrics. Runs as a Deployment with a single replica so each
+  # metric is reported once.
+  cluster:
+    # The chart only renders collectors with enabled set explicitly.
+    enabled: true
+    fullnameOverride: "opentelemetry-kube-stack-cluster-stats"
+    mode: deployment
+    replicas: 1
+    env:
+      - name: ELASTIC_AGENT_OTEL
+        value: "true"
+      - name: ELASTIC_ENDPOINT
+        valueFrom:
+          secretKeyRef:
+            name: elastic-secret-otel
+            key: elastic_endpoint
+      - name: ELASTIC_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: elastic-secret-otel
+            key: elastic_api_key
+    config:
+      receivers:
+        # Kubernetes Cluster receiver
+        # https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/k8sclusterreceiver
+        # Lists nodes, pods and workloads from the API server and emits
+        # cluster-level k8s.* metrics. Configuring this receiver also makes the
+        # chart add the API permissions it needs to the ClusterRole.
+        k8s_cluster:
+          auth_type: serviceAccount
+          collection_interval: 60s
+          # The two allocatable metrics are the inputs the elasticinframetrics
+          # processor maps to the kubernetes.node dataset.
+          allocatable_types_to_report:
+            - cpu
+            - memory
+          node_conditions_to_report:
+            - Ready
+      processors:
+        batch/metrics:
+          send_batch_max_size: 0
+          timeout: 1s
+        resource_detection/env:
+          detectors: [env]
+          timeout: 2s
+          override: false
+        # The env detector adds every attribute in OTEL_RESOURCE_ATTRIBUTES,
+        # which the chart sets to this collector pod's own identity. Node
+        # metrics must not carry the collector's pod name, namespace or IPs, so
+        # remove them. k8s.cluster.name stays, and k8s.node.name is the node's
+        # own because existing attributes win over the detector.
+        resource/drop_collector_identity:
+          attributes:
+            - key: k8s.pod.name
+              action: delete
+            - key: k8s.namespace.name
+              action: delete
+            - key: k8s.pod.ip
+              action: delete
+            - key: k8s.node.ip
+              action: delete
+        resource/hostname:
+          attributes:
+            - key: host.name
+              from_attribute: k8s.node.name
+              action: upsert
+        # k8s.node.allocatable_cpu is a double (for example 3.92 cores). The
+        # processor reads the data point as an integer and would produce 0, so
+        # convert it first. Fractional cores are truncated.
+        transform/allocatable_cpu_int:
+          metric_statements:
+            - context: datapoint
+              statements:
+                - set(value_int, Int(value_double)) where metric.name == "k8s.node.allocatable_cpu"
+        # For k8s_cluster scopes the processor turns k8s.node.allocatable_cpu and
+        # k8s.node.allocatable_memory into kubernetes.node.cpu.allocatable.cores
+        # and kubernetes.node.memory.allocatable.bytes. Everything else the
+        # receiver emits is dropped.
+        elasticinframetrics:
+          add_system_metrics: false
+          add_k8s_metrics: true
+          drop_original: true
+        # The processor labels these metrics with dataset kubernetes.node, but
+        # the Kubernetes integration defines the two allocatable fields in its
+        # kubernetes.state_node dataset (the one fed by kube-state-metrics,
+        # which reads the same API server data). That data stream maps the
+        # fields with the right types and uses kubernetes.node.name as a time
+        # series dimension. The kubernetes.node data stream does neither and
+        # rejects these documents, so route them to state_node.
+        attributes/dataset:
+          actions:
+            - key: event.module
+              value: kubernetes
+              action: upsert
+            - key: data_stream.dataset
+              value: kubernetes.state_node
+              action: upsert
+            - key: event.dataset
+              value: kubernetes.state_node
+              action: upsert
+        transform/ecs_mapping_mode:
+          metric_statements:
+            - context: scope
+              statements:
+                - set(attributes["elastic.mapping.mode"], "ecs")
+      exporters:
+        debug:
+          verbosity: basic
+        elasticsearch:
+          endpoints:
+            - ${env:ELASTIC_ENDPOINT}
+          api_key: ${env:ELASTIC_API_KEY}
+          # Set by the elasticsearch_insecure_skip_verify Terraform variable.
+          # tls:
+          #   insecure_skip_verify: true
+      extensions:
+        cgroup_runtime: {}
+        health_check:
+          endpoint: "0.0.0.0:13133"
+      service:
+        extensions: [cgroup_runtime, health_check]
+        pipelines:
+          metrics/k8s/ecs:
+            receivers:
+              - k8s_cluster
+            processors:
+              - resource_detection/env
+              - resource/drop_collector_identity
+              - resource/hostname
+              - transform/allocatable_cpu_int
+              - elasticinframetrics
+              - attributes/dataset
               - transform/ecs_mapping_mode
               - batch/metrics
             exporters:

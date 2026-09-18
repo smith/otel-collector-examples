@@ -37,7 +37,7 @@ resource "helm_release" "kube_stack" {
         }
       }
       collectors = {
-        daemon = {
+        for name in ["daemon", "cluster"] : name => {
           config = {
             exporters = {
               elasticsearch = {
