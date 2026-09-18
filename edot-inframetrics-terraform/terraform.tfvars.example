@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+# The API key can also be passed as the TF_VAR_elasticsearch_api_key environment variable.
+
+# Must be reachable from inside the cluster. For Elasticsearch running on the
+# minikube host use host.minikube.internal.
+elasticsearch_endpoint = "https://host.minikube.internal:9200"
+elasticsearch_api_key  = "<base64 encoded API key>"
+
+# Local Elasticsearch with a self-signed certificate.
+elasticsearch_insecure_skip_verify = true
+
+# cluster_name          = "minikube"
+# elastic_agent_version = "9.5.4"
+# kube_context          = "minikube"

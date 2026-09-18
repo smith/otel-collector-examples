@@ -1,0 +1,226 @@
+# opentelemetry-kube-stack values for a single Elastic Agent OpenTelemetry
+# collector that scrapes the kubelet on every node and writes pod metrics to
+# Elasticsearch in the Elastic Kubernetes integration (ECS) schema, so they
+# appear in the Kibana infrastructure inventory.
+#
+# Cut down from the Elastic-recommended values file:
+# https://github.com/elastic/elastic-agent/blob/v9.5.4/deploy/helm/edot-collector/kube-stack/values.yaml
+# Logs, traces, host metrics, cluster metrics, the gateway collector and
+# auto-instrumentation are removed. Only the node-level DaemonSet collector
+# remains, and it exports straight to Elasticsearch.
+#
+# Tested with opentelemetry-kube-stack chart 0.16.0 and Elastic Agent 9.5.4.
+
+opentelemetry-operator:
+  admissionWebhooks:
+    certManager:
+      enabled: false # Use cert-manager in production, see the chart docs.
+    autoGenerateCert:
+      enabled: true
+      recreate: true
+
+defaultCRConfig:
+  image:
+    repository: "docker.elastic.co/elastic-agent/elastic-agent"
+    tag: "9.5.4" # Overridden by the elastic_agent_version Terraform variable.
+  targetAllocator:
+    enabled: false
+
+# Becomes the k8s.cluster.name resource attribute (orchestrator.cluster.name in
+# ECS). Overridden by the cluster_name Terraform variable.
+clusterName: minikube
+
+collectors:
+  # One collector pod per node. Each scrapes its own node's kubelet.
+  daemon:
+    fullnameOverride: "opentelemetry-kube-stack-daemon"
+    mode: daemonset
+    # The kubelet is addressed by node name. With hostNetwork the pod uses the
+    # node's DNS and hosts file, where the node name resolves. Same as upstream.
+    hostNetwork: true
+    scrape_configs_file: "" # Disable the chart's default Prometheus scrape config.
+    presets:
+      # All chart presets are off so the pipeline below is the whole config.
+      logsCollection:
+        enabled: false
+      kubeletMetrics:
+        enabled: false
+      hostMetrics:
+        enabled: false
+      kubernetesAttributes:
+        enabled: false
+      kubernetesEvents:
+        enabled: false
+      clusterMetrics:
+        enabled: false
+    env:
+      - name: ELASTIC_AGENT_OTEL
+        value: "true"
+      - name: ELASTIC_ENDPOINT
+        valueFrom:
+          secretKeyRef:
+            name: elastic-secret-otel
+            key: elastic_endpoint
+      - name: ELASTIC_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: elastic-secret-otel
+            key: elastic_api_key
+    config:
+      receivers:
+        # Remove the chart's default OTLP receiver. Nothing sends OTLP here.
+        otlp: null
+        # Kubelet Stats receiver
+        # https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/kubeletstatsreceiver
+        # Reads the kubelet summary API (/stats/summary) on this node and emits
+        # OTel k8s.* metrics with k8s.pod.uid, k8s.pod.name, k8s.namespace.name
+        # and k8s.node.name resource attributes. The scope name of these metrics
+        # is how the elasticinframetrics processor recognises them.
+        kubelet_stats:
+          auth_type: serviceAccount
+          collection_interval: 60s
+          endpoint: ${env:OTEL_K8S_NODE_NAME}:10250
+          node: "${env:OTEL_K8S_NODE_NAME}"
+          # Kubelet serving certs are rarely trusted by the cluster CA.
+          insecure_skip_verify: true
+          k8s_api_config:
+            auth_type: serviceAccount
+          # The pod-level utilization metrics are off by default in the receiver
+          # and are the inputs the elasticinframetrics processor needs.
+          # k8s.pod.network.io is on by default and is the fifth input.
+          metrics:
+            k8s.pod.cpu.node.utilization:
+              enabled: true
+            k8s.pod.memory.node.utilization:
+              enabled: true
+            k8s.pod.cpu_limit_utilization:
+              enabled: true
+            k8s.pod.memory_limit_utilization:
+              enabled: true
+      processors:
+        # Remove the chart's default batch processor in favour of batch/metrics.
+        batch: null
+        # Batch processor
+        # send_batch_max_size must be 0 so a scrape is never split across bulk
+        # requests. Split requests can cause version_conflict_engine_exception in
+        # the time series (TSDB) data streams the Kubernetes integration creates.
+        batch/metrics:
+          send_batch_max_size: 0
+          timeout: 1s
+        # Resource detection: adds k8s.cluster.name and other attributes the
+        # chart passes in OTEL_RESOURCE_ATTRIBUTES. Existing attributes win.
+        resource_detection/env:
+          detectors: [env]
+          timeout: 2s
+          override: false
+        resource/hostname:
+          attributes:
+            - key: host.name
+              from_attribute: k8s.node.name
+              action: upsert
+        # Kubernetes attributes processor
+        # Enriches each pod's metrics with workload metadata (deployment,
+        # daemonset, ...) from the API server. The node filter keeps each
+        # collector's watch to the pods on its own node.
+        k8s_attributes:
+          filter:
+            node_from_env_var: OTEL_K8S_NODE_NAME
+          passthrough: false
+          pod_association:
+            - sources:
+                - from: resource_attribute
+                  name: k8s.pod.ip
+            - sources:
+                - from: resource_attribute
+                  name: k8s.pod.uid
+            - sources:
+                - from: resource_attribute
+                  name: k8s.pod.name
+                - from: resource_attribute
+                  name: k8s.namespace.name
+            - sources:
+                - from: connection
+          extract:
+            metadata:
+              - "k8s.namespace.name"
+              - "k8s.deployment.name"
+              - "k8s.replicaset.name"
+              - "k8s.statefulset.name"
+              - "k8s.daemonset.name"
+              - "k8s.cronjob.name"
+              - "k8s.job.name"
+              - "k8s.node.name"
+              - "k8s.pod.name"
+              - "k8s.pod.ip"
+              - "k8s.pod.uid"
+              - "k8s.pod.start_time"
+        # Elastic Infra Metrics processor
+        # https://github.com/elastic/opentelemetry-collector-components/tree/main/processor/elasticinframetricsprocessor
+        # Acts only on metrics whose scope name is the kubeletstats or k8s_cluster
+        # receiver. For kubeletstats it turns the five k8s.pod.* inputs into the
+        # Kubernetes integration's kubernetes.pod.{cpu,memory}.usage.{node,limit}.pct
+        # and kubernetes.pod.network.{rx,tx}.bytes, and sets data_stream.dataset
+        # and event.dataset to kubernetes.pod. drop_original removes the OTel
+        # originals from those scopes. Other scopes pass through untouched.
+        elasticinframetrics:
+          add_system_metrics: false
+          add_k8s_metrics: true
+          drop_original: true
+        # The infrastructure inventory's pod view filters on
+        # event.module: kubernetes, which the processor does not set.
+        attributes/event_module:
+          actions:
+            - key: event.module
+              value: kubernetes
+              action: upsert
+        # The Elasticsearch exporter chooses its mapping mode per scope from
+        # this attribute (the exporter's mapping::mode setting is deprecated).
+        # ECS mode writes flat ECS field names and routes documents to
+        # metrics-<data_stream.dataset>-<data_stream.namespace>.
+        transform/ecs_mapping_mode:
+          metric_statements:
+            - context: scope
+              statements:
+                - set(attributes["elastic.mapping.mode"], "ecs")
+      exporters:
+        # One log line per batch. Useful while validating, noisy in production.
+        debug:
+          verbosity: basic
+        # Elasticsearch exporter
+        # https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/exporter/elasticsearchexporter/README.md
+        elasticsearch:
+          endpoints:
+            - ${env:ELASTIC_ENDPOINT}
+          api_key: ${env:ELASTIC_API_KEY}
+          # Set by the elasticsearch_insecure_skip_verify Terraform variable.
+          # Uncomment for a direct `helm install` against a self-signed certificate.
+          # tls:
+          #   insecure_skip_verify: true
+      extensions:
+        cgroup_runtime: {}
+        health_check:
+          endpoint: "0.0.0.0:13133"
+      service:
+        extensions: [cgroup_runtime, health_check]
+        pipelines:
+          # Disable the chart's default pipelines.
+          logs: null
+          metrics: null
+          traces: null
+          metrics/k8s/ecs:
+            receivers:
+              - kubelet_stats
+            processors:
+              - k8s_attributes
+              - resource_detection/env
+              - resource/hostname
+              - elasticinframetrics
+              - attributes/event_module
+              - transform/ecs_mapping_mode
+              - batch/metrics
+            exporters:
+              - debug
+              - elasticsearch
+
+instrumentation:
+  enabled: false
