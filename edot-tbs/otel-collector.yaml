@@ -1,3 +1,17 @@
+# Tail-based sampling (TBS) for Elastic Observability, modelled on the hosted
+# (managed OTLP) collectors, collapsed into a single collector:
+#
+#   ingest       otlp -> elasticapm (enrich) ---------------------+
+#                                                                  |
+#   aggregation  elasticapm connector: APM metrics from 100% of    |
+#                traces, so throughput/latency/error rates stay    |
+#                accurate no matter how much is sampled away       |
+#                                                                  v
+#   index        forward -> tail_sampling -> otlp_http/elastic   (hosted: Kafka hop)
+#
+# Only traces are sampled. Logs, metrics and aggregated APM metrics are always
+# kept in full.
+
 receivers:
   otlp:
     protocols:
@@ -5,45 +19,85 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
+  # Loopback for the collector's own tail sampling metrics (see service.telemetry).
+  otlp/sampling_metrics:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4335
 
 connectors:
   elasticapm: {}
+  # Stands in for Kafka. Hosted keys trace messages by trace ID so every span of
+  # a trace reaches the same tail sampler; one collector gets that for free.
   forward: {}
 
 processors:
   elasticapm: {}
+
   tail_sampling:
-    decision_wait: 10s
-    num_traces: 100
-    expected_new_traces_per_sec: 10
+    # How long to buffer a trace's spans before deciding. Hosted uses 30s.
+    decision_wait: 30s
+    # Max traces held in memory; raise if sampling_trace_dropped_too_early > 0.
+    num_traces: 50000
+    # Remember decisions after a trace leaves memory so late spans follow them.
+    decision_cache:
+      sampled_cache_size: 200000
+      non_sampled_cache_size: 200000
+    # Policies are OR'd: a trace is kept if ANY policy samples it. A rule can
+    # therefore only raise a subset above the catch-all rate, never lower it.
+    # Hosted pattern: "match X AND keep N%" rules, plus a catch-all default.
     policies:
-      - name: latency-gt-1s
-        type: latency
-        latency:
-          threshold_ms: 1000
-          upper_threshold_ms: 10000
-      # - name: baseline
-      #   type: probabilistic
-      #   probabilistic:
-      #     sampling_percentage: 100
-      - name: errors
+      # Uncomment to keep 100% of traces.
+      # - name: keep-all
+      #   type: always_sample
+
+      - name: errors-100pct
         type: status_code
-        status_code:
-          status_codes: [ERROR]
-      - name: sampled-exit-spans
+        status_code: { status_codes: [ERROR] }
+
+      - name: checkout-50pct
         type: and
         and:
           and_sub_policy:
-            - name: has-exit-span
+            - name: svc
+              type: string_attribute
+              string_attribute: { key: service.name, values: [checkout] }
+            - name: rate
+              type: probabilistic
+              probabilistic: { sampling_percentage: 50 }
+
+      - name: exit-spans-20pct
+        type: and
+        and:
+          and_sub_policy:
+            - name: exit-span
               type: ottl_condition
               ottl_condition:
                 error_mode: ignore
-                span:
-                  - kind == SPAN_KIND_CLIENT or kind == SPAN_KIND_PRODUCER
-            - name: twenty-percent
+                span: ['kind == SPAN_KIND_CLIENT or kind == SPAN_KIND_PRODUCER']
+            - name: rate
               type: probabilistic
-              probabilistic:
-                sampling_percentage: 20
+              probabilistic: { sampling_percentage: 20 }
+
+      # Catch-all for everything not matched above.
+      - name: default-10pct
+        type: probabilistic
+        probabilistic: { sampling_percentage: 10 }
+
+  # Hosted exports sampling decision metrics to the customer's cluster so the
+  # effect of each policy is visible. Lands in metrics-sampling.otel-default.
+  filter/sampling_metrics:
+    metrics:
+      include:
+        match_type: strict
+        metric_names:
+          - otelcol_processor_tail_sampling_count_traces_sampled
+          - otelcol_processor_tail_sampling_global_count_traces_sampled
+  transform/sampling_metrics:
+    metric_statements:
+      - context: resource
+        statements:
+          - set(attributes["data_stream.dataset"], "sampling")
 
 exporters:
   debug: {}
@@ -55,24 +109,41 @@ exporters:
       insecure_skip_verify: true
 
 service:
+  telemetry:
+    resource:
+      service.name: edot-tbs-collector
+    metrics:
+      readers:
+        - periodic:
+            interval: 10000
+            exporter:
+              otlp:
+                endpoint: http://127.0.0.1:4335
+                protocol: http/protobuf
+                temporality_preference: delta
+
   pipelines:
-    traces/1-process-elastic:
+    traces/ingest:
       receivers: [otlp]
       processors: [elasticapm]
       exporters: [debug, elasticapm, forward]
-    traces/2-process-tbs:
+    traces/index:
       receivers: [forward]
       processors: [tail_sampling]
       exporters: [debug, otlp_http/elastic]
-    metrics/aggregated-otel-metrics:
+    metrics/aggregated:
       receivers: [elasticapm]
       processors: []
-      exporters: [debug, otlp_http/elastic]
+      exporters: [otlp_http/elastic]
+    metrics/sampling:
+      receivers: [otlp/sampling_metrics]
+      processors: [filter/sampling_metrics, transform/sampling_metrics]
+      exporters: [otlp_http/elastic]
     metrics:
       receivers: [otlp]
-      processors: []
-      exporters: [debug, otlp_http/elastic]
+      processors: [elasticapm]
+      exporters: [otlp_http/elastic]
     logs:
       receivers: [otlp]
-      processors: []
-      exporters: [debug, otlp_http/elastic]
+      processors: [elasticapm]
+      exporters: [otlp_http/elastic]
