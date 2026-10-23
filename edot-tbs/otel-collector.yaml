@@ -69,41 +69,49 @@ processors:
     # Hosted pattern: "match X AND keep N%" rules, plus a catch-all default.
     policies:
       # Uncomment to keep 100% of traces.
-      - name: keep-all
-        type: always_sample
+      # - name: keep-all
+      #   type: always_sample
 
       - name: errors-100pct
         type: status_code
         status_code: { status_codes: [ERROR] }
 
-      - name: checkout-50pct
-        type: and
-        and:
-          and_sub_policy:
-            - name: svc
-              type: string_attribute
-              string_attribute: { key: service.name, values: [checkout] }
-            - name: rate
-              type: probabilistic
-              probabilistic: { sampling_percentage: 50 }
+      # - name: checkout-50pct
+      #   type: and
+      #   and:
+      #     and_sub_policy:
+      #       - name: svc
+      #         type: string_attribute
+      #         string_attribute: { key: service.name, values: [checkout] }
+      #       - name: rate
+      #         type: probabilistic
+      #         probabilistic: { sampling_percentage: 50 }
 
-      - name: exit-spans-20pct
-        type: and
-        and:
-          and_sub_policy:
-            - name: exit-span
-              type: ottl_condition
-              ottl_condition:
-                error_mode: ignore
-                span: ['kind == SPAN_KIND_CLIENT or kind == SPAN_KIND_PRODUCER']
-            - name: rate
-              type: probabilistic
-              probabilistic: { sampling_percentage: 20 }
+      # - name: exit-spans-20pct
+      #   type: and
+      #   and:
+      #     and_sub_policy:
+      #       - name: exit-span
+      #         type: ottl_condition
+      #         ottl_condition:
+      #           error_mode: ignore
+      #           span: ['kind == SPAN_KIND_CLIENT or kind == SPAN_KIND_PRODUCER']
+      #       - name: rate
+      #         type: probabilistic
+      #         probabilistic: { sampling_percentage: 20 }
 
       # Catch-all for everything not matched above.
-      - name: default-10pct
-        type: probabilistic
-        probabilistic: { sampling_percentage: 10 }
+      # - name: default-10pct
+      #   type: probabilistic
+      #   probabilistic: { sampling_percentage: 10 }
+    
+      # Drop everything and only use metrics
+      - name: drop-all
+        type: drop
+        drop:
+          drop_sub_policy:
+            - name: all
+              type: always_sample
 
   # Hosted exports sampling decision metrics to the customer's cluster so the
   # effect of each policy is visible. Lands in metrics-sampling.otel-default.
