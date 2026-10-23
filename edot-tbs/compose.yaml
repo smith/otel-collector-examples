@@ -1,6 +1,10 @@
 services:
   elastic-agent:
     container_name: elastic-agent
+    # Becomes host.name on host metrics.
+    hostname: docker-desktop
+    # Lets the processes scraper see every process in the VM, not just this container's.
+    pid: host
     image: docker.elastic.co/elastic-agent/elastic-agent:9.6.0-SNAPSHOT
     command: ["otel", "--config", "/etc/elastic-agent/otel-collector.yaml"]
     restart: unless-stopped
